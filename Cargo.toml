@@ -1,0 +1,28 @@
+[package]
+name = "dear-imgui-demo"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+web = ["dear-imgui-wgpu/webgl", "dear-imgui-rs/wasm"]
+
+[dependencies]
+dear-imgui-rs = { version = "0.22.0", default-features = false }
+dear-imgui-winit = "0.22.0"
+dear-imgui-wgpu = { version = "0.22.0", default-features = false, features = ["wgpu-30"] }
+winit = "0.30.13"
+pollster = "0.4"
+env_logger = "0.11"
+log = "0.4"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1"
+wasm-bindgen = "=0.2.130"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Document", "Element", "HtmlCanvasElement", "Window"] }
