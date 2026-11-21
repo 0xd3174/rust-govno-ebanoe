@@ -6,7 +6,7 @@ PORT ?= 8088
 WASM := target/wasm32-unknown-unknown/release/dear_imgui_demo.wasm
 PKG := web/pkg
 
-.PHONY: native web provider serve
+.PHONY: native web provider serve check
 
 native:
 	$(CARGO) run
@@ -21,6 +21,9 @@ $(WASM): Cargo.toml src/lib.rs
 
 provider:
 	./scripts/build-provider.sh
+
+check:
+	$(PYTHON) scripts/check_web_bundle.py
 
 serve:
 	$(PYTHON) -m http.server $(PORT) -d web
