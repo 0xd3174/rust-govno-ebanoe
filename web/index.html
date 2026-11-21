@@ -3,37 +3,63 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>dear-imgui-rs 0.22 - wasm32 probe</title>
+    <title>dear-imgui-rs 0.22 - winit + wgpu (wasm32)</title>
     <style>
-      body { margin: 0; background: #101014; color: #d8d8e0; font: 14px/1.45 ui-monospace, monospace; }
-      main { padding: 24px; max-width: 1100px; }
-      h1 { font-size: 16px; font-weight: 600; }
-      pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; background: #1a1a22; border-left: 3px solid #c04; }
-      .ok { border-left-color: #2a2; }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #101014;
+        color: #d8d8e0;
+        font: 14px/1.45 ui-monospace, monospace;
+      }
+      body {
+        display: grid;
+        place-items: center;
+      }
+      canvas {
+        display: block;
+        box-shadow: 0 0 0 1px #333;
+      }
+      #error {
+        position: fixed;
+        inset: 24px;
+        margin: 0;
+        padding: 16px;
+        overflow: auto;
+        background: #1a1a22;
+        border-left: 3px solid #c04;
+        white-space: pre-wrap;
+      }
     </style>
+    <!-- The provider is an ES module; the import map must precede module scripts. -->
+    <script type="importmap">
+      {
+        "imports": {
+          "imgui-sys-v1": "./provider/imgui-sys-v1-wrapper.js"
+        }
+      }
+    </script>
+    <script>
+      // Shared linear memory: the provider places its static data at 64 MiB and
+      // grows upward; the Rust module's data stays in the low region.
+      globalThis.__imgui_shared_memory = new WebAssembly.Memory({
+        initial: 2048,
+        maximum: 4096,
+      });
+    </script>
   </head>
   <body>
-    <main>
-      <h1>dear-imgui-rs 0.22.0 wasm32-unknown-unknown probe</h1>
-      <p>
-        This page loads the Rust/wgpu/winit wasm build. A working build needs the
-        <code>imgui-sys-v1</code> provider module that the crate imports from.
-      </p>
-      <pre id="log">loading wasm module...</pre>
-    </main>
+    <pre id="error" hidden></pre>
     <script type="module">
-      const log = document.getElementById("log");
-      const write = (text, ok = false) => {
-        log.textContent = text;
-        if (ok) log.classList.add("ok");
-      };
-
+      const error = document.getElementById("error");
       try {
         const module = await import("./pkg/dear_imgui_demo.js");
         await module.default();
-        write("wasm module instantiated; winit event loop started", true);
-      } catch (error) {
-        write(`wasm load failed:\n${error?.stack ?? String(error)}`);
+      } catch (cause) {
+        error.hidden = false;
+        error.textContent = `wasm initialization failed:\n${cause?.stack ?? String(cause)}`;
+        console.error(cause);
       }
     </script>
   </body>

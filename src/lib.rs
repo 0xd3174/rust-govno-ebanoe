@@ -6,6 +6,11 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
 use dear_imgui_rs::Context;
 use dear_imgui_wgpu::wgpu;
@@ -29,6 +34,7 @@ struct DemoState {
     queue: wgpu::Queue,
     window: Arc<Window>,
     frames: u64,
+    last_frame_at: Instant,
 }
 
 impl DemoState {
@@ -38,7 +44,13 @@ impl DemoState {
         let mut platform = WinitPlatform::new(&mut context)?;
         platform.attach_window(window.clone(), HiDpiMode::Default, &mut context)?;
 
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let mut instance_desc = wgpu::InstanceDescriptor::new_without_display_handle();
+        // Browsers may expose `navigator.gpu` without a usable adapter. Force the
+        // WebGL backend there; native builds keep the default backend set.
+        if cfg!(target_arch = "wasm32") {
+            instance_desc.backends = wgpu::Backends::GL;
+        }
+        let instance = wgpu::Instance::new(instance_desc);
         let surface = instance.create_surface(window.clone())?;
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -48,8 +60,16 @@ impl DemoState {
                 ..Default::default()
             })
             .await?;
+        let limits = if cfg!(target_arch = "wasm32") {
+            wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits())
+        } else {
+            wgpu::Limits::default()
+        };
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
+            .request_device(&wgpu::DeviceDescriptor {
+                required_limits: limits,
+                ..Default::default()
+            })
             .await?;
 
         let size = window.inner_size();
@@ -88,6 +108,7 @@ impl DemoState {
             queue,
             window,
             frames: 0,
+            last_frame_at: Instant::now(),
         })
     }
 
@@ -103,7 +124,16 @@ impl DemoState {
     fn redraw(&mut self) -> Result<(), AnyError> {
         let size = self.window.inner_size();
         if size.width == 0 || size.height == 0 {
+            log::debug!("redraw skipped: window size {size:?}");
             return Ok(());
+        }
+        let now = Instant::now();
+        if now.duration_since(self.last_frame_at) < Duration::from_millis(1) {
+            return Ok(());
+        }
+        self.last_frame_at = now;
+        if self.frames == 0 {
+            log::info!("first frame: {}x{}", size.width, size.height);
         }
         if (self.config.width, self.config.height) != (size.width, size.height) {
             self.resize(size);
@@ -120,7 +150,7 @@ impl DemoState {
                 .size([460.0, 96.0], dear_imgui_rs::Condition::FirstUseEver)
                 .build(|| {
                     ui.text("Dear ImGui 1.93.1 via dear-imgui-rs 0.22.0");
-                    ui.text("winit + wgpu, dependencies from crates.io only");
+                    ui.text("winit + wgpu on native and wasm32");
                     ui.text(format!("frame {frames}"));
                 });
             self.context.render(consumer)
@@ -205,15 +235,17 @@ impl ApplicationHandler for DemoApp {
         if self.state.borrow().is_some() {
             return;
         }
-        let window = Arc::new(
-            event_loop
-                .create_window(
-                    Window::default_attributes()
-                        .with_title("dear-imgui-rs 0.22 - winit + wgpu")
-                        .with_inner_size(LogicalSize::new(800.0, 500.0)),
-                )
-                .expect("create window"),
-        );
+        #[allow(unused_mut)]
+        let mut attributes = Window::default_attributes()
+            .with_title("dear-imgui-rs 0.22 - winit + wgpu")
+            .with_inner_size(LogicalSize::new(800.0, 500.0));
+        #[cfg(target_arch = "wasm32")]
+        {
+            use winit::platform::web::WindowAttributesExtWebSys;
+            attributes = attributes.with_append(true);
+        }
+        let window = Arc::new(event_loop.create_window(attributes).expect("create window"));
+        log::debug!("winit: window created ({:?})", window.inner_size());
 
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -231,7 +263,11 @@ impl ApplicationHandler for DemoApp {
                         state.window.request_redraw();
                         *slot.borrow_mut() = Some(state);
                     }
-                    Err(error) => log::error!("initialization failed: {error}"),
+                    Err(error) => {
+                        log::error!("initialization failed: {error}");
+                        let message = format!("initialization failed: {error}");
+                        web_sys::console::error_1(&wasm_bindgen::JsValue::from_str(&message));
+                    }
                 }
             });
         }
@@ -297,8 +333,11 @@ pub fn start() -> Result<(), wasm_bindgen::JsValue> {
     use winit::platform::web::EventLoopExtWebSys;
 
     console_error_panic_hook::set_once();
+    let _ = console_log::init_with_level(log::Level::Info);
+    log::info!("wasm start: creating event loop");
     let event_loop =
         EventLoop::new().map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?;
+    log::info!("wasm start: spawning app");
     event_loop.spawn_app(DemoApp::new());
     Ok(())
 }

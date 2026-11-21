@@ -1,4 +1,6 @@
 /target
 /web/pkg
+/web/provider
+/.provider-src
 /result
 .direnv/

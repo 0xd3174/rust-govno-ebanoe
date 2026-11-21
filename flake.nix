@@ -8,38 +8,50 @@
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
+      runtimeLibs = with pkgs; [
+        wayland
+        libxkbcommon
+        libX11
+        libXcursor
+        libXi
+        libXrandr
+        vulkan-loader
+        mesa
+      ];
     in
     {
-      devShells.${system}.default = pkgs.mkShell {
-        packages = with pkgs; [
-          rustc
-          cargo
-          clang
-          lld
-          wasm-bindgen-cli
-          binaryen
-          python3
-          pkg-config
-          libxkbcommon
-          wayland
-          libX11
-          libXcursor
-          libXi
-          libXrandr
-          mesa
-          vulkan-loader
-        ];
+      devShells.${system} = {
+        default = pkgs.mkShell {
+          packages = with pkgs; [
+            rustc
+            cargo
+            clang
+            lld
+            wasm-bindgen-cli
+            binaryen
+            wasm-tools
+            python3
+            pkg-config
+          ] ++ runtimeLibs;
 
-        env.LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
-          pkgs.wayland
-          pkgs.libxkbcommon
-          pkgs.libX11
-          pkgs.libXcursor
-          pkgs.libXi
-          pkgs.libXrandr
-          pkgs.vulkan-loader
-          pkgs.mesa
-        ];
+          env.LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtimeLibs;
+        };
+
+        # Builds the Emscripten provider from the dear-imgui-rs repository checkout.
+        provider = pkgs.mkShell {
+          packages = with pkgs; [
+            rustc
+            cargo
+            wasm-bindgen-cli
+            binaryen
+            wasm-tools
+            emscripten
+            lld
+            clang
+            python3
+            pkg-config
+          ];
+        };
       };
     };
 }

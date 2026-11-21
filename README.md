@@ -1,13 +1,27 @@
 # dear-imgui-rs 0.22 minimal demo
 
-Two targets share one application module (`src/lib.rs`):
+One Dear ImGui window, two targets:
 
-1. Native `winit` window using `wgpu` and Dear ImGui. **Works.**
-2. `wasm32-unknown-unknown` browser build. **Builds, but cannot be instantiated** because
-   `dear-imgui-rs 0.22` obtains the Dear ImGui core from an external wasm provider module that
-   is not published on crates.io.
+1. Native `winit` + `wgpu` window.
+2. `wasm32-unknown-unknown` build running in a browser on WebGL2.
 
-All Rust dependencies come from crates.io; `Cargo.lock` contains zero git sources.
+Both are verified on NixOS 26.11 / niri (Wayland):
+
+| Native | Browser |
+|---|---|
+| ![Native winit window](docs/native-winit.png) | ![wasm32 build in Chromium](docs/wasm-browser.png) |
+
+## Dependencies and the one build-time exception
+
+The application's Cargo graph is crates.io-only: `Cargo.lock` contains only registry packages and
+no git sources.
+
+The browser target additionally needs the `imgui-sys-v1` WebAssembly provider. `dear-imgui-rs
+0.22` deliberately ships only import bindings on wasm; the provider is built by the upstream
+repository's `xtask` with Emscripten and is not published on crates.io. The provider is
+generated once from the pinned 0.22.0 release commit (`7424350...`) and copied into
+`web/provider/` as three static files (gitignored). No repository code is vendored into the
+crate or linked into the application.
 
 | Component | Version |
 |---|---|
@@ -16,7 +30,8 @@ All Rust dependencies come from crates.io; `Cargo.lock` contains zero git source
 | `dear-imgui-wgpu` | 0.22.0 (wgpu 30) |
 | `winit` | 0.30.13 |
 | Rust | 1.99.1 (`rust-version = 1.95` required by the crates) |
-| Dear ImGui (native C++) | 1.93.1 WIP docking |
+| wasm-bindgen | 0.2.130 |
+| Dear ImGui | 1.93.1 WIP docking |
 
 ## Native (winit)
 
@@ -24,77 +39,74 @@ All Rust dependencies come from crates.io; `Cargo.lock` contains zero git source
 nix develop -c cargo run
 ```
 
-Verified on NixOS with niri/Wayland and the Intel Vulkan driver. The window shows a Dear ImGui
-window with a live frame counter:
+`WinitPlatform::prepare_frame`, `Context::frame`, `Context::render` and `WgpuRenderer::render`
+run every frame; the renderer is shut down explicitly before the context is dropped.
 
-![Native winit window](docs/native-winit.png)
+## wasm32 (browser)
 
-`WinitPlatform::prepare_frame`, `Context::frame`, `Context::render` and
-`WgpuRenderer::render` are exercised every frame. The renderer is shut down explicitly before
-the context is dropped.
-
-## wasm32 (browser) - blocked by the published crates
+Prerequisites: `nix` (for the pinned Emscripten toolchain), network access for the first
+provider build, and a browser with WebGL2.
 
 ```sh
-nix develop -c make web    # cargo build --target wasm32-unknown-unknown + wasm-bindgen
-nix develop -c make serve  # python3 -m http.server 8088 -d web
+nix develop -c make provider   # build imgui-sys-v1 from the pinned upstream checkout
+nix develop -c make web        # build the app, run wasm-bindgen, patch shared memory
+nix develop -c make serve      # http://127.0.0.1:8088/
 ```
 
-Open <http://127.0.0.1:8088/>. The page fails while loading the module:
+`make provider` clones `Latias94/dear-imgui-rs` into `.provider-src/` at commit
+`7424350518efb54693b8acd4a417b69d9d0f015b`, builds the app demo and the provider with
+Emscripten, and copies `imgui-sys-v1.{js,wasm}` plus `imgui-sys-v1-wrapper.js` to
+`web/provider/`. The app's wasm is built by `make web` without any upstream source.
 
-![Browser probe failure](docs/wasm-probe.png)
+Runtime wiring:
+
+1. `web/index.html` creates `globalThis.__imgui_shared_memory` (2048 pages, maximum 4096) before
+   any module script runs, and installs an import map for the bare specifier `imgui-sys-v1`.
+2. The provider wrapper is an ES module with top-level `await`; it instantiates the Emscripten
+   module with that memory. The provider places its static data at 64 MiB
+   (`GLOBAL_BASE=67108864`), leaving the low region to the Rust module.
+3. `scripts/patch_web_glue.py` converts the wasm-bindgen module's own memory into an import of
+   `env.memory` (WAT round trip through `wasm-tools`) and injects the shared memory into the
+   generated init code, so both modules address one linear memory.
+4. On wasm the app requests `wgpu::Backends::GL`. WebGL2 limits are taken from the adapter via
+   `Limits::downlevel_webgl2_defaults().using_resolution(...)`, which the browser requires
+   (the default limits request `max_compute_workgroups_per_dimension = 65535`).
+
+Verified in Chromium: continuous rendering, frame counter increasing (572 -> 840 between two
+screenshots). Headless verification needs SwiftShader:
+
+```sh
+nix run nixpkgs#chromium -- --headless=new --no-sandbox \
+  --use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader \
+  --window-size=900,600 --virtual-time-budget=8000 \
+  --screenshot=/tmp/wasm.png http://127.0.0.1:8088/
+```
+
+## Upstream toolchain notes
+
+- Emscripten 6 removed the `allocate` runtime helper that the 0.22.0 `xtask` still lists in
+  `EXPORTED_RUNTIME_METHODS`; the provider build aborts during JS finalization. The build script
+  strips that single entry from the local checkout: `scripts/patch_xtask_emscripten.py`.
+- The 0.22.0 `xtask` also patches the generated wasm-bindgen glue by searching for
+  `const imports = {};`, which wasm-bindgen 0.2.130 no longer emits. Its injection lands in the
+  wrong scope and throws `ReferenceError: imports is not defined`. This project does not use that
+  injection; `scripts/patch_web_glue.py` patches the current glue at
+  `const imports = __wbg_get_imports();` and inserts the environment memory there.
+
+## crates.io-only variant
+
+`web/probe.html` loads the same application without the provider and without the import map. It
+demonstrates the constraint discussed above: the module imports the bare specifier
+`imgui-sys-v1`, so the browser raises
 
 ```
 TypeError: Failed to resolve module specifier "imgui-sys-v1".
-Relative references must start with either "/", "./", or "../".
 ```
 
-### Root cause
+![crates.io-only probe](docs/wasm-probe.png)
 
-`dear-imgui-rs 0.22` changed the wasm build to an import-style ABI. On
-`wasm32-unknown-unknown` with the `wasm` feature, `dear-imgui-sys` does not compile the C++
-core. It emits declarations in the `imgui-sys-v1` wasm import module (86 imported functions in
-this demo after dead-code elimination):
-
-```sh
-wasm-objdump -x target/wasm32-unknown-unknown/release/dear_imgui_demo.wasm \
-  | grep -c imgui-sys-v1
-# 86
-```
-
-`wasm-bindgen` turns those into ES module imports of the bare specifier `imgui-sys-v1`, so the
-browser requires a JavaScript module (normally installed through an import map) that exports the
-provider. The provider is the Dear ImGui + cimgui core compiled once with Emscripten, and it
-must share one `WebAssembly.Memory` with the Rust module.
-
-The published crates do not contain that provider:
-
-- `dear-imgui-sys 0.22.0` tarball has no `.wasm` or loader files; its `build.rs` explicitly
-  skips compilation for wasm targets (`CoreBuildOutcome::WasmImports`) and states:
-  "The WASM provider is compiled separately by xtask."
-- The crate README instructs users to run `cargo run -p xtask -- build-cimgui-provider` and
-  `cargo run -p xtask -- web-demo`. `xtask`, `docs/WASM.md`, and `examples-wasm/` exist only in
-  the source repository and are not part of any crates.io package.
-- The `wasm + prebuilt` combination is rejected by the build script, so the prebuilt native
-  archives cannot substitute for the provider.
-- The crates.io package list for `dear-imgui` and `cimgui` contains only bindings, backends, and
-  extensions. Nothing publishes a `imgui-sys-v1` provider or a loader for it.
-
-Consequently, under the constraint "crates.io only, no repository checkout", the browser target
-cannot be completed. The failure is in the dependency's distribution model, not in this project.
-
-## Options
-
-1. **Relax the constraint** and let the project use the repository's `xtask` (or the release
-   provider artifact). This is the supported path and the only one that keeps the ABI contract
-   verified by the crate.
-2. **Build a local provider** from the cimgui sources that *are* vendored inside
-   `dear-imgui-sys 0.22.0` (crates.io), using Emscripten, and supply the required
-   `imgui-sys-v1` JavaScript module. This obeys the crates.io-only rule but requires
-   reconstructing the unpublished build (source transforms, export list, memory sharing,
-   allocator strategy) and is not a "minimal demo". It also has no ABI guarantee from upstream.
-3. **Use another UI stack for the browser target** and keep `dear-imgui-rs 0.22` for native
-   only.
+The application wasm itself already imports 86 `imgui-sys-v1` functions after dead-code
+elimination; see `wasm-objdump -x target/wasm32-unknown-unknown/release/dear_imgui_demo.wasm`.
 
 ## Layout
 
@@ -102,6 +114,10 @@ cannot be completed. The failure is in the dependency's distribution model, not 
 |---|---|
 | `src/lib.rs` | Shared application, native entry, wasm entry |
 | `src/main.rs` | Native binary |
-| `web/index.html` | Probe page that loads the wasm build and reports errors |
-| `Makefile` | `native`, `web`, `serve` targets |
-| `flake.nix` | Rust 1.99, clang, wasm-bindgen 0.2.130, runtime libraries for winit/wgpu |
+| `web/index.html` | Working page: shared memory, import map, error overlay |
+| `web/probe.html` | crates.io-only failure page |
+| `scripts/build-provider.sh` | Builds the pinned provider into `web/provider/` |
+| `scripts/patch_web_glue.py` | Shared-memory patch for the app wasm and glue |
+| `scripts/patch_xtask_emscripten.py` | Emscripten 6 compatibility fix for the provider build |
+| `Makefile` | `native`, `provider`, `web`, `serve` targets |
+| `flake.nix` | Default shell (Rust, wasm-bindgen, wasm-tools, winit/wgpu libraries) and `provider` shell (adds Emscripten) |
