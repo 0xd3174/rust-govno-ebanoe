@@ -12,7 +12,7 @@ use web_time::Instant;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 
-use dear_imgui_rs::Context;
+use dear_imgui_rs::{Color, Condition, Context, Ui, WindowFlags};
 use dear_imgui_wgpu::wgpu;
 use dear_imgui_wgpu::{FramebufferExtent, WgpuInitInfo, WgpuRenderer};
 use dear_imgui_winit::{HiDpiMode, WinitPlatform};
@@ -23,6 +23,132 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowId};
 
 type AnyError = Box<dyn std::error::Error>;
+
+const TORUS_MAJOR: f32 = 1.0;
+const TORUS_MINOR: f32 = 0.42;
+const TORUS_THETA: usize = 72;
+const TORUS_PHI: usize = 36;
+
+#[cfg(test)]
+fn torus_point(theta: f32, phi: f32) -> [f32; 3] {
+    let ring = TORUS_MAJOR + TORUS_MINOR * phi.cos();
+    [ring * theta.cos(), TORUS_MINOR * phi.sin(), ring * theta.sin()]
+}
+
+#[cfg(test)]
+fn torus_normal(theta: f32, phi: f32) -> [f32; 3] {
+    [
+        phi.cos() * theta.cos(),
+        phi.sin(),
+        phi.cos() * theta.sin(),
+    ]
+}
+
+#[cfg(test)]
+fn rotate_x([x, y, z]: [f32; 3], angle: f32) -> [f32; 3] {
+    let (sin, cos) = angle.sin_cos();
+    [x, y * cos - z * sin, y * sin + z * cos]
+}
+
+#[cfg(test)]
+fn rotate_y([x, y, z]: [f32; 3], angle: f32) -> [f32; 3] {
+    let (sin, cos) = angle.sin_cos();
+    [x * cos + z * sin, y, -x * sin + z * cos]
+}
+
+#[inline]
+fn rotate_x_cached([x, y, z]: [f32; 3], sin: f32, cos: f32) -> [f32; 3] {
+    [x, y * cos - z * sin, y * sin + z * cos]
+}
+
+#[inline]
+fn rotate_y_cached([x, y, z]: [f32; 3], sin: f32, cos: f32) -> [f32; 3] {
+    [x * cos + z * sin, y, -x * sin + z * cos]
+}
+
+/// Spinning torus rendered through the ImGui draw list. This exercises the full
+/// draw-list -> renderer path on both native and wasm without extra GPU pipelines.
+fn draw_torus(ui: &Ui, time: f32) {
+    let [width, height] = ui.io().display_size();
+    if width < 64.0 || height < 64.0 {
+        return;
+    }
+    let center = [width * 0.5, height * 0.5];
+    let scale = width.min(height) * 0.30;
+    let (rot_x_sin, rot_x_cos) = (time * 0.55).sin_cos();
+    let (rot_y_sin, rot_y_cos) = (time * 0.9).sin_cos();
+    let light = [-0.45_f32, 0.55, -0.70];
+    let theta_table: Vec<(f32, f32)> = (0..TORUS_THETA)
+        .map(|index| {
+            let theta = index as f32 / TORUS_THETA as f32 * std::f32::consts::TAU;
+            theta.sin_cos()
+        })
+        .collect();
+    let phi_table: Vec<(f32, f32)> = (0..TORUS_PHI)
+        .map(|index| {
+            let phi = index as f32 / TORUS_PHI as f32 * std::f32::consts::TAU;
+            phi.sin_cos()
+        })
+        .collect();
+
+    let mut dots = Vec::with_capacity(TORUS_THETA * TORUS_PHI);
+    for &(theta_sin, theta_cos) in &theta_table {
+        for &(phi_sin, phi_cos) in &phi_table {
+            let point = rotate_y_cached(
+                rotate_x_cached(
+                    [
+                        (TORUS_MAJOR + TORUS_MINOR * phi_cos) * theta_cos,
+                        TORUS_MINOR * phi_sin,
+                        (TORUS_MAJOR + TORUS_MINOR * phi_cos) * theta_sin,
+                    ],
+                    rot_x_sin,
+                    rot_x_cos,
+                ),
+                rot_y_sin,
+                rot_y_cos,
+            );
+            let normal = rotate_y_cached(
+                rotate_x_cached(
+                    [phi_cos * theta_cos, phi_sin, phi_cos * theta_sin],
+                    rot_x_sin,
+                    rot_x_cos,
+                ),
+                rot_y_sin,
+                rot_y_cos,
+            );
+            let perspective = 3.2 / (point[2] + 4.2);
+            let light_dot = (normal[0] * light[0]
+                + normal[1] * light[1]
+                + normal[2] * light[2])
+                .max(0.0);
+            let shade = 0.32 + 0.68 * light_dot.powf(1.3);
+            dots.push((
+                [
+                    center[0] + point[0] * perspective * scale,
+                    center[1] - point[1] * perspective * scale,
+                ],
+                point[2],
+                shade,
+            ));
+        }
+    }
+    dots.sort_by(|left, right| left.1.total_cmp(&right.1));
+
+    let draw_list = ui.get_window_draw_list();
+    for ([x, y], _, shade) in dots {
+        let color = Color::from_rgba_bytes(
+            (255.0 * shade) as u8,
+            (170.0 * shade) as u8,
+            (55.0 * shade) as u8,
+            245,
+        );
+        draw_list
+            .add_circle([x, y], 1.3 + 0.7 * shade, color)
+            .filled(true)
+            .num_segments(std::num::NonZeroUsize::new(6).unwrap())
+            .build();
+    }
+}
 
 struct DemoState {
     context: Context,
@@ -35,6 +161,7 @@ struct DemoState {
     window: Arc<Window>,
     frames: u64,
     last_frame_at: Instant,
+    started_at: Instant,
 }
 
 impl DemoState {
@@ -109,6 +236,7 @@ impl DemoState {
             window,
             frames: 0,
             last_frame_at: Instant::now(),
+            started_at: Instant::now(),
         })
     }
 
@@ -143,15 +271,45 @@ impl DemoState {
             .prepare_frame(&mut self.context, &self.window)?;
 
         let frames = self.frames;
+        if frames == 0 {
+            self.started_at = Instant::now();
+        }
+        let elapsed = self.started_at.elapsed().as_secs_f32();
         let consumer = self.renderer.renderer_consumer()?;
         let frame = {
             let ui = &*self.context.frame();
-            ui.window("dear-imgui-rs 0.22")
-                .size([460.0, 96.0], dear_imgui_rs::Condition::FirstUseEver)
+            let [width, height] = ui.io().display_size();
+            let flags = WindowFlags::NO_DECORATION
+                | WindowFlags::NO_BACKGROUND
+                | WindowFlags::NO_MOVE
+                | WindowFlags::NO_RESIZE
+                | WindowFlags::NO_SCROLLBAR
+                | WindowFlags::NO_SAVED_SETTINGS
+                | WindowFlags::NO_INPUTS
+                | WindowFlags::NO_FOCUS_ON_APPEARING
+                | WindowFlags::NO_NAV;
+            ui.window("canvas")
+                .size([width, height], Condition::Always)
+                .position([0.0, 0.0], Condition::Always)
+                .flags(flags)
                 .build(|| {
+                    draw_torus(ui, elapsed);
+                    ui.get_window_draw_list()
+                        .add_rect(
+                            [8.0, 8.0],
+                            [600.0, 86.0],
+                            Color::from_rgba_bytes(8, 8, 14, 210),
+                        )
+                        .filled(true)
+                        .build();
+                    ui.set_cursor_pos([16.0, 14.0]);
                     ui.text("Dear ImGui 1.93.1 via dear-imgui-rs 0.22.0");
                     ui.text("winit + wgpu on native and wasm32");
-                    ui.text(format!("frame {frames}"));
+                    let fps = frames as f32 / elapsed.max(0.001);
+                    ui.text(format!(
+                        "frame {frames} · {fps:.0} fps · torus {} dots",
+                        TORUS_THETA * TORUS_PHI
+                    ));
                 });
             self.context.render(consumer)
         };
@@ -340,4 +498,40 @@ pub fn start() -> Result<(), wasm_bindgen::JsValue> {
     log::info!("wasm start: spawning app");
     event_loop.spawn_app(DemoApp::new());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn torus_surface_points_and_normals_are_bounded() {
+        for i in 0..32 {
+            let theta = i as f32 / 32.0 * std::f32::consts::TAU;
+            for j in 0..16 {
+                let phi = j as f32 / 16.0 * std::f32::consts::TAU;
+                let point = torus_point(theta, phi);
+                let ring = (point[0] * point[0] + point[2] * point[2]).sqrt();
+                assert!(ring >= TORUS_MAJOR - TORUS_MINOR - 1e-4);
+                assert!(ring <= TORUS_MAJOR + TORUS_MINOR + 1e-4);
+                assert!(point[1].abs() <= TORUS_MINOR + 1e-4);
+
+                let normal = torus_normal(theta, phi);
+                let length =
+                    (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2])
+                        .sqrt();
+                assert!((length - 1.0).abs() < 1e-4);
+            }
+        }
+    }
+
+    #[test]
+    fn rotations_preserve_length() {
+        let point = torus_point(0.3, 1.7);
+        let length = |value: [f32; 3]| {
+            (value[0] * value[0] + value[1] * value[1] + value[2] * value[2]).sqrt()
+        };
+        let rotated = rotate_y(rotate_x(point, 0.7), 1.3);
+        assert!((length(point) - length(rotated)).abs() < 1e-4);
+    }
 }
